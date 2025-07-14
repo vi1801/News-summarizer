@@ -10,8 +10,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.runnables import RunnableSequence
 
 import feedparser
-import requests
-from bs4 import BeautifulSoup
+from newspaper import Article
 import re
 
 load_dotenv()
@@ -19,7 +18,7 @@ load_dotenv()
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*","http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "https://app-news-summarizer.onrender.com"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,93 +85,38 @@ def fetch_news_from_rss(rss_url: str, num_articles: int = 5) -> List[Dict]:
         print(f"Error fetching RSS feed {rss_url}: {e}")
         raise HTTPException(status_code=400, detail=f"Could not fetch RSS feed: {e}")
 
-def extract_main_article_text(url: str) -> str:
+def extract_main_article_text(url: str) -> Dict:
     """
-    Fetches the content of a given URL and attempts to extract the main article text.
-    This is a heuristic and may not work perfectly for all websites, especially those
-    heavily reliant on client-side JavaScript rendering.
+    Fetches the content of a given URL and attempts to extract the main article text,
+    title, and link using newspaper3k.
     """
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'DNT': '1', # Do Not Track
+        article = Article(url)
+        
+        article.download()
+        article.parse()
+        
+        # Build the article object to return
+        extracted_data = {
+            "title": article.title if article.title else "No Title Found",
+            "text": article.text if article.text else "Could not extract meaningful content from the URL.",
+            "link": url 
         }
         
-        if "google.com" in url or "bing.com" in url: 
-            headers['Referer'] = 'https://www.google.com/'
-        else:
-             headers['Referer'] = url # Self-refer if not from a search engine
+        if len(extracted_data["text"].strip()) < 100:
+            extracted_data["text"] = "Could not extract meaningful content from the URL."
+            
+        return extracted_data
 
-        response = requests.get(url, headers=headers, timeout=15) # Increased timeout
-        response.raise_for_status() 
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # Prioritized selectors for main article content
-        # Ordered from most specific/reliable to more generic
-        selectors = [
-            'article[itemprop="articleBody"]', # Common for many news sites
-            'div[itemprop="articleBody"]',
-            'article.post-content',
-            'div.post-content',
-            'div.entry-content',
-            'div.article-body',
-            'div.article__content',
-            'div.g-article', # Specific to some Google News articles
-            'article', # General article tag
-            'main',    # General main content tag
-            'div[role="main"]',
-            '#main-content',
-            '#article-content',
-            '#main',
-            '#content',
-        ]
-
-        article_text_parts = []
-        for selector in selectors:
-            found_element = soup.select_one(selector)
-            if found_element:
-                # Extract all paragraph text within the found element
-                paragraphs = found_element.find_all('p')
-                if paragraphs:
-                    # Filter out very short paragraphs (e.g., captions, empty)
-                    # and join them. Min length increased slightly.
-                    text = "\n".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50])
-                    if text: # Ensure we actually extracted some text
-                        article_text_parts.append(text)
-                        break # Stop after finding the first good content block
-
-        full_text = "\n\n".join(article_text_parts)
-        
-        # Fallback: If no specific article content found, try to get all text from body or common divs
-        if not full_text or len(full_text.strip()) < 100: # If initial extraction failed or too short
-            body_text = []
-            for p in soup.find_all('p'):
-                p_text = p.get_text(strip=True)
-                if len(p_text) > 50 and not p_text.lower().startswith(('read more', 'comments', 'share this')): # Basic filter for boilerplate
-                    body_text.append(p_text)
-            full_text = "\n\n".join(body_text)
-
-        # Further clean up common web artifacts (e.g., multiple newlines, script tags text)
-        full_text = re.sub(r'\s+', ' ', full_text).strip() # Replace multiple spaces/newlines with single space
-        
-        return full_text if len(full_text) > 100 else "Could not extract meaningful content from the URL."
-
-    except requests.exceptions.RequestException as e:
-        print(f"Network or HTTP error fetching {url}: {e}")
-        # Return a more specific error message from the HTTP status code
-        if response.status_code == 404:
-            return f"Error fetching article from URL: 404 Not Found. The article might not exist or the URL is incorrect."
-        elif response.status_code == 403:
-            return f"Error fetching article from URL: 403 Forbidden. The website might be blocking automated access."
-        else:
-            return f"Error fetching article from URL: {e}"
     except Exception as e:
-        print(f"Error parsing content from {url}: {e}")
-        return f"Error processing article content: {e}"
+        print(f"Error extracting article with newspaper3k from {url}: {e}")
+        error_message = f"Error extracting article content: {e}. The website might be blocking automated access or has a complex structure."
+        return {
+            "title": "Extraction Error",
+            "text": error_message,
+            "link": url
+        }
+
 
 @app.get("/")
 async def read_root():
@@ -203,36 +147,21 @@ async def summarize_rss_endpoint(request: SummarizeRSSRequest):
 async def summarize_single_article_endpoint(request: SummarizeArticleRequest):
     print(f"Received request to summarize single article from: {request.article_url}")
 
-    # Extract full text from the article URL
-    article_full_text = extract_main_article_text(request.article_url)
-
-    # Check for specific error messages from extract_main_article_text
-    if "Error fetching" in article_full_text or "Could not extract" in article_full_text:
-        # If it's a specific error message, raise HTTPException with it
-        raise HTTPException(status_code=400, detail=article_full_text)
+    extracted_article_data = extract_main_article_text(request.article_url)
+    
+    if "Error extracting article content" in extracted_article_data["text"] or \
+       "Could not extract meaningful content" in extracted_article_data["text"]:
+        raise HTTPException(status_code=400, detail=extracted_article_data["text"])
     
     # Summarize the extracted text
-    summary = summarize_article_content(article_full_text)
-
-    title = f"Summary of: {request.article_url}"
-
-    try:
-        # Try to get title from the fetched HTML
-        response = requests.get(request.article_url, timeout=5)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        html_title = soup.find('title')
-        if html_title and html_title.string:
-            title = html_title.string.strip()
-    except Exception as e:
-        print(f"Could not extract title from URL: {e}")
-
+    summary = summarize_article_content(extracted_article_data["text"])
 
     print(f"Successfully summarized single article: {request.article_url}")
     return {
         "message": "Article summary generated successfully!",
         "summaries": [{
-            "title": title,
-            "link": request.article_url,
+            "title": extracted_article_data["title"],
+            "link": extracted_article_data["link"],
             "summary": summary
         }]
     }
