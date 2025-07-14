@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import './App.css'; // Import the CSS file
 
+const BackendUrl = process.env.REACT_APP_BACKEND_URL || 'http://localhost:8888';
+
 function App() {
   // State for RSS summarization
   const [rssUrl, setRssUrl] = useState('');
@@ -34,7 +36,7 @@ function App() {
     }
 
     try {
-      const response = await fetch('http://localhost:8888/summarize_rss', {
+      const response = await fetch(`${BackendUrl}/summarize_rss`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -72,7 +74,7 @@ function App() {
     }
 
     try {
-      const response = await fetch('http://localhost:8888/summarize_article', {
+      const response = await fetch(`${BackendUrl}/summarize_article`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
